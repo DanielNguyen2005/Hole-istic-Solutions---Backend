@@ -1,4 +1,5 @@
 from azure.storage.blob import BlobServiceClient, ContentSettings
+import requests
 import uuid
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -43,6 +44,46 @@ def upload_to_blob(file):
         print(f"Blob upload error: {e}")
         return None
 
+# --- AI VERIFICATION LOGIC ---
+def verify_pothole_with_ai(image_url):
+    try:
+        # 1. Grab Sean's keys from the .env file
+        endpoint = os.getenv('AI_ENDPOINT')
+        project_id = os.getenv('AI_PROJECT_ID')
+        iteration_name = os.getenv('AI_ITERATION_NAME') # Sean needs to tell you this! (e.g., "Iteration1")
+        ai_key = os.getenv('AI_PREDICTION_KEY')
+        
+        # 2. Build the official Azure Custom Vision Prediction URL
+        prediction_url = f"{endpoint}customvision/v3.0/Prediction/{project_id}/detect/iterations/{iteration_name}/url"
+        
+        headers = {
+            'Prediction-Key': ai_key,
+            'Content-Type': 'application/json'
+        }
+        
+        # 3. Send the image we just saved to Blob Storage over to the AI
+        body = {"url": image_url}
+        response = requests.post(prediction_url, headers=headers, json=body)
+        
+        if response.status_code != 200:
+            print("AI API Error:", response.text)
+            return True # Fallback: let it through if Sean's AI is offline
+            
+        data = response.json()
+        
+        # 4. Check the AI's math! Look for 'pothole' with > 60% confidence
+        for prediction in data.get('predictions', []):
+            if 'pothole' in prediction['tagName'].lower() and prediction['probability'] > 0.60:
+                print(f"AI Approved! Detected '{prediction['tagName']}' with Confidence: {prediction['probability'] * 100:.2f}%")
+                return True 
+                
+        print("AI Rejected: No pothole detected.")
+        return False
+        
+    except Exception as e:
+        print(f"AI Connection Error: {e}")
+        return True
+
 # --- CREATE API ENDPOINT ---
 @app.route('/api/report', methods=['POST'])
 def receive_report():
@@ -77,13 +118,23 @@ def receive_report():
         return jsonify({"error": "No image file attached."}), 400
             
     file = request.files['image']
+
+    # 1. Grab the file from the React waiter
+    file = request.files['image']
         
-    # 2. Push the physical file into your Azure Blob container
+    # 2. Upload it to Azure and save the link as 'image_url'
     image_url = upload_to_blob(file)
-        
-    # 3. If the upload fails, stop the report and throw an error
+    
+    # 3. Stop if the upload failed
     if not image_url:
         return jsonify({"error": "Failed to save image to Azure Cloud."}), 500
+        
+    # 2. Push the physical file into your Azure Blob container
+    is_pothole = verify_pothole_with_ai(image_url)
+        
+    # 3. If the upload fails, stop the report and throw an error
+    if not is_pothole:
+       return jsonify({"error": "AI rejected report: No pothole detected in image."}), 400
     
     pothole_size = data.get('size', 'small').lower()
     traffic_volume = data.get('traffic_volume', 'low').lower()
