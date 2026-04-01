@@ -13,6 +13,7 @@ load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
+
 # --- DATABASE CONNECTION LOGIC ---
 def get_db_connection():
     server = os.getenv('DB_SERVER')
@@ -101,12 +102,6 @@ def receive_report():
     except KeyError:
         return jsonify({"error": "Location object must contain latitude and longitude"}), 400
 
-    if not (50.8 <= lat <= 51.2):
-        return jsonify({"error": "Latitude is outside Calgary city limits. Report rejected."}), 400
-        
-    if not (-114.3 <= lon <= -113.8):
-        return jsonify({"error": "Longitude is outside Calgary city limits. Report rejected."}), 400
-
     # 3. Validate Severity Range (assuming a 1-10 scale)
     severity = int(data['severity'])
     if not (1 <= severity <= 10):
@@ -119,9 +114,6 @@ def receive_report():
             
     file = request.files['image']
 
-    # 1. Grab the file from the React waiter
-    file = request.files['image']
-        
     # 2. Upload it to Azure and save the link as 'image_url'
     image_url = upload_to_blob(file)
     
@@ -129,10 +121,10 @@ def receive_report():
     if not image_url:
         return jsonify({"error": "Failed to save image to Azure Cloud."}), 500
         
-    # 2. Push the physical file into your Azure Blob container
+    # 4. Push the physical file into your Azure Blob container for AI review
     is_pothole = verify_pothole_with_ai(image_url)
         
-    # 3. If the upload fails, stop the report and throw an error
+    # 5. If the AI rejects it, stop the report and throw an error
     if not is_pothole:
        return jsonify({"error": "AI rejected report: No pothole detected in image."}), 400
     
@@ -186,41 +178,45 @@ def receive_report():
         "calculated_tier": urgency_tier
     }), 201
 
-# --- GET API ENDPOINT (Send data to the Frontend) ---
+# --- DASHBOARD ENDPOINT: GET ALL REPORTS ---
 @app.route('/api/reports', methods=['GET'])
-def get_reports():
+def get_all_reports():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Pull everything from Azure and sort it by Urgency (Critical first)
+        # Pull everything from Azure and sort it by newest first
         select_query = """
             SELECT id, device_id, submitted_at, latitude, longitude, image_url, severity, urgency_tier
             FROM Reports
-            ORDER BY 
-                CASE urgency_tier
-                    WHEN 'Critical' THEN 1
-                    WHEN 'Urgent' THEN 2
-                    WHEN 'Normal' THEN 3
-                    ELSE 4
-                END,
-                severity DESC
+            ORDER BY submitted_at DESC
         """
         cursor.execute(select_query)
         rows = cursor.fetchall()
         
-        # Package the raw SQL data into a clean JSON list for Shar
+        # Package the raw SQL data into a clean JSON list for Shahriar's Dashboard
         reports_list = []
         for row in rows:
+            # Map Azure's Urgency Tier to Shahriar's Severity Badges
+            severity_map = {
+                'Critical': 'High',
+                'Urgent': 'Medium',
+                'Normal': 'Low'
+            }
+            
+            # Format the date safely
+            formatted_date = row.submitted_at.strftime('%Y-%m-%d') if row.submitted_at else "Unknown Date"
+            
             reports_list.append({
                 "id": row.id,
-                "device_id": row.device_id,
-                "submitted_at": row.submitted_at,
+                "location": "Calgary", 
+                "date": formatted_date,
+                "status": "Open", 
+                "severity": severity_map.get(row.urgency_tier, "Medium"),
                 "latitude": float(row.latitude),
                 "longitude": float(row.longitude),
-                "image_url": row.image_url,
-                "severity": row.severity,
-                "urgency_tier": row.urgency_tier
+                "description": f"System urgency: {row.urgency_tier} (Score: {row.severity}/10). Reported by device {row.device_id}.",
+                "image": row.image_url if row.image_url else "No image uploaded"
             })
             
         cursor.close()
@@ -231,41 +227,7 @@ def get_reports():
     except Exception as e:
         print(f"Database fetch error: {e}")
         return jsonify({"error": "Failed to retrieve reports from database"}), 500
-    
-# --- DASHBOARD ENDPOINT: GET ALL REPORTS ---
-@app.route('/api/reports', methods=['GET'])
-def get_all_reports():
-    try:
-        # 1. Open the vault
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        # 2. Grab all potholes, sorting the most urgent ones to the very top!
-        cursor.execute("SELECT * FROM Reports ORDER BY urgency_tier DESC")
-        rows = cursor.fetchall()
-
-        # 3. Translate the SQL data into a clean Python list
-        reports_list = []
-        for row in rows:
-            reports_list.append({
-                "id": row.id,
-                "device_id": row.device_id,
-                "latitude": float(row.latitude),
-                "longitude": float(row.longitude),
-                "severity": row.severity,
-                "urgency_tier": row.urgency_tier,
-                "image_url": row.image_url
-            })
-
-        conn.close()
-
-        # 4. Ship it to the frontend
-        return jsonify(reports_list), 200
-
-    except Exception as e:
-        print("GET Error:", e)
-        return jsonify({"error": "Could not fetch dashboard data"}), 500
-    
+        
 # Start the server
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
