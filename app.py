@@ -124,9 +124,8 @@ def receive_report():
     # 4. Push the physical file into your Azure Blob container for AI review
     is_pothole = verify_pothole_with_ai(image_url)
         
-    # 5. If the AI rejects it, stop the report and throw an error
-    if not is_pothole:
-       return jsonify({"error": "AI rejected report: No pothole detected in image."}), 400
+    # 5. Instead of rejecting the report, we change its status!
+    report_status = "Open" if is_pothole else "Flagged"
     
     pothole_size = data.get('size', 'small').lower()
     traffic_volume = data.get('traffic_volume', 'low').lower()
@@ -160,10 +159,10 @@ def receive_report():
         cursor = conn.cursor()
         
         insert_query = """
-            INSERT INTO Reports (device_id, submitted_at, latitude, longitude, image_url, severity, urgency_tier)
-            VALUES (?, GETDATE(), ?, ?, ?, ?, ?)
+            INSERT INTO Reports (device_id, submitted_at, latitude, longitude, image_url, severity, urgency_tier, status)
+            VALUES (?, GETDATE(), ?, ?, ?, ?, ?, ?)
         """
-        cursor.execute(insert_query, data['device_id'], lat, lon, image_url, severity, urgency_tier)
+        cursor.execute(insert_query, data['device_id'], lat, lon, image_url, severity, urgency_tier, report_status)
         
         conn.commit()
         cursor.close()
@@ -187,7 +186,7 @@ def get_all_reports():
         
         # Pull everything from Azure and sort it by newest first
         select_query = """
-            SELECT id, device_id, submitted_at, latitude, longitude, image_url, severity, urgency_tier
+            SELECT id, device_id, submitted_at, latitude, longitude, image_url, severity, urgency_tier, status
             FROM Reports
             ORDER BY submitted_at DESC
         """
@@ -211,7 +210,7 @@ def get_all_reports():
                 "id": row.id,
                 "location": "Calgary", 
                 "date": formatted_date,
-                "status": "Open", 
+                "status": row.status if row.status else "Open", 
                 "severity": severity_map.get(row.urgency_tier, "Medium"),
                 "latitude": float(row.latitude),
                 "longitude": float(row.longitude),
@@ -228,6 +227,7 @@ def get_all_reports():
         print(f"Database fetch error: {e}")
         return jsonify({"error": "Failed to retrieve reports from database"}), 500
         
-# Start the server
+# Start the server (Cloud-Ready!)
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
